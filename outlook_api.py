@@ -6,85 +6,73 @@
 # pip install Flask msal requests python-dotenv
 
 import os
-from tkinter import Scale
-
-from flask import Flask, request, redirect, url_for, session, jsonify
-from msal import ConfidentialClientApplication
-from dotenv import load_dotenv
 import requests
-from sqlalchemy.util.langhelpers import repr_tuple_names
+from flask import Flask, redirect, request, session, jsonify
+from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv() #load environment variables
 
 app = Flask(__name__)
-app.secret_key = os.urandom(24)  #securing the session for each use case
-
-#Credentials for Azure login and Authentication
+app.secret_key = os.urandom(24) # a secure key for sessions
 
 CLIENT_ID = os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
-AUTHORITY = os.getenv("AUTHORITY")
-REDIRECT_URL = os.getenv("REDIRECT_URI")
-SCOPE = os.getenv("SCOPE")
+TENANT_ID = os.getenv("TENANT_ID")
+REDIRECT_URI = os.getenv("REDIRECT_URI")
+AUTHORITY = f"https://login.microsoftonline.com/{TENANT_ID}"
+SCOPE = "User.Read"
 
-# create an msal instance for confidential client
+@app.route('/')
+def home():
+    return 'Welcome to the Outlook Sign-In App! <a href="/login">Login with Outlook</a>'
 
-msal_app = ConfidentialClientApplication(CLIENT_ID,authority=AUTHORITY,client_credential=CLIENT_SECRET)
-
-
-
-
-@app.route("/")
-def index():
-    """
-    Default route and fetches the user data if authenticated via a session token.
-    Else it will initiate an Outlook Sign in
-
-    """
-
-    if "token" in session:
-        user_data = get_user_profile(session["token"])
-        return jsonify(user_data)
-    else:
-        return '<a href = "\login">"Sign in with Outlook"</a>'
-
-@app.route("/login")
+@app.route('/login')
 def login():
-    """
-    generates a authorization url for the user to sign in.
-    This will request the user to give basic information
-    """
-    flow = msal_app.initiate_auth_code_flow(SCOPE,redirect_uri=REDIRECT_URL)
-    #Store the flow in the session
+    # Redirect the user to the Microsoft login page
+    auth_url = (
+        f"{AUTHORITY}/oauth2/v2.0/authorize?"
+        f"client_id={CLIENT_ID}&"
+        f"response_type=code&"
+        f"redirect_uri={REDIRECT_URI}&"
+        f"response_mode=query&"
+        f"scope={SCOPE}"
+    )
+    return redirect(auth_url)
 
-    session["flow"] = flow
+@app.route('/auth')
+def auth_callback():
+    # Retrieve the authorization code from the callback
+    code = request.args.get('code')
 
-    return redirect(flow["auth_uri"])
+    # Exchange the authorization code for an access token
+    token_url = f"{AUTHORITY}/oauth2/v2.0/token"
+    token_data = {
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET,
+        'grant_type': 'authorization_code',
+        'code': code,
+        'redirect_uri': REDIRECT_URI,
+        'scope': SCOPE
+    }
 
-@app.route("/getAToken")
-def authorized():
-    flow = session.get("flow")
-    token_response = msal_app.acquire_token_by_auth_code_flow(flow,request.args)
+    token_response = requests.post(token_url, data=token_data)
+    token_response_json = token_response.json()
 
-    # Store the access token in the session
+    # Check for errors in the token response
+    if "error" in token_response_json:
+        return jsonify(token_response_json), 400
 
-    if "access_token" in token_response:
-        session["token"] = token_response["access token"]
+    # Use the access token to get user information from Microsoft Graph API
+    access_token = token_response_json['access_token']
+    user_info_response = requests.get(
+        "https://graph.microsoft.com/v1.0/me",
+        headers={"Authorization": f"Bearer {access_token}"}
+    )
 
-    return redirect(url_for("index"))
+    # Return the user information as JSON
+    return jsonify(user_info_response.json())
 
+if __name__ == '__main__':
+    app.run(ssl_context = 'adhoc',debug=True)
 
-def get_user_profile(token):
-    """
-    Fetches user profile information from Microsoft graph api
-    The access token is passed in the request header
-    This will return the basic user information such as name, username and email.
-    Note: Info like Student Id is subject to University restrictions.
-    """
-    headers = {"Authorization" : "Bearer" + token}
-    response = request.get("https://graph.microsoft.com/v1.0/me", headers=headers)
-    return response.json()
-
-if __name__ == "__main__":
-    app.run(debug=True)
 
